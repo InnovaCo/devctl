@@ -1,0 +1,89 @@
+#!/bin/bash
+
+ACTION=$1
+shift 1
+
+. /root/ctl/scriptbase
+
+case "${ACTION}" in
+    add)
+        require_username
+        require_email
+        prepare_pass
+        echo user: ${USER}, email: ${MAIL}, password: ${PASS}
+
+        #system
+        useradd --comment ${MAIL} --groups ssh_users,developers,webdav --skel ${CTLPATH}/skel --create-home --password ${PASS} --user-group --shell /bin/bash ${USER}
+        if [ $? != 0 ]; then
+            exit 1
+        fi
+        echo -ne "${PASS}\n${PASS}\n" | passwd ${USER} > /dev/null
+        usermod -a -G ${USER} www-data
+        chown -R ${USER}:${USER} /home/${USER}
+
+        #samba
+#        cat ${SMB_CONF_DIR}/users/USER.conf.template | sed "s/::USER::/${USER}/g" > ${SMB_CONF_DIR}/users/${USER}.conf
+#        echo "include = ${SMB_CONF_DIR}/users/20_${USER}.conf" >> ${SMB_CONF_DIR}/smb.conf
+
+        echo -ne "${PASS}\n${PASS}\n" | smbpasswd -s -a ${USER}
+        smbpasswd -e ${USER}
+
+        #git
+        echo ${PASS} | sudo -HnSu ${USER} -i git config --global user.name ${USER}
+        echo ${PASS} | sudo -HnSu ${USER} -i git config --global user.email ${MAIL}
+
+#        service ssh restart
+    ;;
+    del)
+        require_username
+
+        #samba
+        smbpasswd -x ${USER}
+        if [ $? != 0 ]; then
+            exit 1
+        fi
+#        rm -f /etc/samba/include/*${USER}*
+        service samba reload
+
+        #system
+        userdel --remove ${USER}
+        groupdel ${USER}
+        rm -rf /home/${USER}
+
+#        service ssh restart
+    ;;
+    lock)
+        require_username
+
+        #samba
+        smbpasswd -d ${USER}
+
+        #system
+        usermod --lock ${USER}
+        GROUPS=`id -nG ${USER} | sed 's/ssh_users//g' | sed 's/\ /,/g' | sed 's/^,\|,$//g'`
+        echo "usermod -G ${GROUPS} ${USER}"
+        unset GROUPS
+        service "ssh" restart
+    ;;
+    unlock)
+        require_username
+
+        #system
+        usermod --unlock ${USER}
+        usermod -a -G ssh_users ${USER}
+        service "ssh" restart
+
+        #samba
+        smbpasswd -e ${USER}
+    ;;
+    regenerate)
+    ;;
+    *)
+        echo -ne "Usage:\n\t`basename $0` (add|del|lock|unlock) username [email]\n  or\n\t`basename $0` regenerate\n\n"
+        exit 1
+    ;;
+esac
+
+regen_projects
+
+exit 0

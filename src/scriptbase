@@ -1,0 +1,257 @@
+#!/bin/bash
+
+. /root/ctl/vars
+
+unset USER
+unset MAIL
+unset PASS
+
+USER=$1
+MAIL=$2
+PASS=$3
+
+require_username() {
+    if [ "${USER}" == "" ]; then
+        echo -ne "Usage:\n\t`basename $0` username [email]\n\n"
+        exit 1
+    fi
+}
+
+require_email() {
+    if [ "${MAIL}" == "" ]; then
+        echo -ne "Usage:\n\t`basename $0` username email\n\n"
+        exit 1
+    fi
+}
+
+prepare_pass() {
+    if [ "$PASS" == "" ]; then
+        PASS=`</dev/urandom tr -dc A-Za-z0-9_ | head -c12`
+    fi
+}
+
+get_users() {
+    USERS=`cat /etc/group | grep developers | cut -d ":" -f 4 | tr -s "," " "`
+}
+
+is_user_locked() {
+    local L=`passwd -S $1 | cut -d " " -f 2`
+    if [ "$L" == "L" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+log() {
+    local D=`date +"%F %X"`
+    echo -e "$D\t$@"
+}
+
+regen_projects() {
+    get_users
+
+    log "removing all virtual hosts"
+    rm -f $NGINX_SA/{web,webdav}/*.conf
+    rm -f $NGINX_SE/{web,webdav}/*_*.conf
+
+    mkdir -p /home/webdav/{data,logs} > /dev/null
+    mkdir -p $NGINX_LOG_DIR/webdav > /dev/null
+    rm -f /home/webdav/logs/* > /dev/null
+
+    for USER in $USERS; do
+        log "preparing directories for user ${USER}"
+        if [ ! -d "/home/${USER}/dev" ]; then
+            mkdir -p /home/${USER}/dev > /dev/null
+            chown -R ${USER}:${USER} /home/${USER}/dev
+        fi
+        if [ ! -d "/home/${USER}/configs-ru" ]; then
+            mkdir -p /home/${USER}/configs-ru > /dev/null
+            chown -R ${USER}:${USER} /home/${USER}/configs-ru
+        fi
+        if [ ! -d "/home/${USER}/configs-eu" ]; then
+            mkdir -p /home/${USER}/configs-eu > /dev/null
+            chown -R ${USER}:${USER} /home/${USER}/configs-eu
+        fi
+        if [ ! -d "/home/${USER}/logs" ]; then
+            mkdir -p /home/${USER}/logs > /dev/null
+            chown -R ${USER}:${USER} /home/${USER}/logs
+        else
+            rm -f /home/${USER}/logs/*_{error,access}.log > /dev/null
+        fi
+        mkdir -p $NGINX_LOG_DIR/${USER} > /dev/null
+    done;
+
+    cat ${PROJECTS_LIST} | cut -d "|" -f 1,2,3,4,5 | while read X; do
+        if [ "$X" == "" ]; then
+            continue
+        fi
+        unset PNAME
+        unset PTYPE
+        unset PPATH
+        unset PAREA
+        unset P_TPL
+        local PNAME=`echo ${X} | cut -d "|" -f 1`
+        local PTYPE=`echo ${X} | cut -d "|" -f 2 | awk '{print tolower($0)}'`
+        local PPATH=`echo ${X} | cut -d "|" -f 3 | awk '{print tolower($0)}'`
+        local PAREA=`echo ${X} | cut -d "|" -f 4 | awk '{print tolower($0)}'`
+        local P_TPL=`echo ${X} | cut -d "|" -f 5`
+
+        log "### ${PNAME} (${PTYPE}, ${P_TPL}, ${PAREA})"
+
+        case "${PTYPE}" in
+            "lib")
+                for USER in $USERS; do
+                    log "\t@@@ ${USER}"
+                    local FPPATH=/home/${USER}/dev/${PPATH}
+                    if [ ! -d "$FPPATH" ]; then
+                        mkdir -p $FPPATH > /dev/null
+                        chown -R ${USER}:${USER} /home/${USER}/dev/${PPATH%/*}
+                        log "\t\tpath ${FPPATH} created"
+                    else
+                        log "\t\tpath ${FPPATH} already exists"
+                    fi
+                done;
+            ;;
+            "web")
+                for USER in $USERS; do
+                    log "\t@@@ ${USER}"
+                    local WEB_PNAME=${USER}.${PNAME}${DOMAIN_SUFFIX}
+
+                    local DOCROOT=/home/${USER}/dev/${PPATH}/htdocs
+                    if [ ! -d "$DOCROOT" ]; then
+                        mkdir -p $DOCROOT > /dev/null
+                        echo "${WEB_PNAME} dummy page" > $DOCROOT/index.html
+                        chown -R ${USER}:${USER} /home/${USER}/dev/${PPATH%/*}
+                        log "\t\tpath ${DOCROOT} created"
+                    else
+                        log "\t\tpath ${DOCROOT} already exists"
+                    fi
+
+                    local USER_LOG_DIR=/home/${USER}/logs
+
+                    local ACCESSLOG=${USER_LOG_DIR}/${PNAME}${DOMAIN_SUFFIX}_access.log
+                    local ERRORLOG=${USER_LOG_DIR}/${PNAME}${DOMAIN_SUFFIX}_error.log
+
+                    if [ "$P_TPL" == "" ]; then
+                        local TPL="default"
+                    elif [ ! -f "${NGINX_SA}/web/${P_TPL}.tpl" ]; then
+                        log "\t\tWARNING: vhost template ${P_TPL} not found; using default"
+                        local TPL="default"
+                    else
+                        local TPL=${P_TPL}
+                    fi
+
+                    local TPL="${NGINX_SA}/web/${TPL}.tpl"
+
+                    if [ ! -f "$TPL" ]; then
+                        log "\t\tERROR: vhost template '${TPL}' doesn't exists. Skipping project $PNAME for user $USER"
+                        continue
+                    fi
+
+                    local VHOST_FILE="$NGINX_SA/web/${USER}.conf"
+                    local VHOST_LINK="$NGINX_SE/web/20_${USER}.conf"
+                    local ENVID="DEV-${PAREA}-${USER}"
+                    local I18N=`echo "/home/${USER}/dev/i18n" | sed 's/\//\\\\\//g'`
+                    local COREPATH=`echo "/home/${USER}/dev/core" | sed 's/\//\\\\\//g'`
+                    local LCONFPATH=`echo "/home/${USER}/configs-${PAREA}" | sed 's/\//\\\\\//g'`
+                    local DOCROOT=`echo "${DOCROOT}" | sed 's/\//\\\\\//g'`
+                    local ACCESSLOG=`echo "${ACCESSLOG}" | sed 's/\//\\\\\//g'`
+                    local ERRORLOG=`echo "${ERRORLOG}" | sed 's/\//\\\\\//g'`
+                    cat ${TPL} \
+                     | sed "s/::DOMAINNAME::/${WEB_PNAME}/g" \
+                     | sed "s/::DOCROOT::/${DOCROOT}/" \
+                     | sed "s/::ACCESSLOG::/${ACCESSLOG}/" \
+                     | sed "s/::ERRORLOG::/${ERRORLOG}/" \
+                     | sed "s/::ENVID::/${ENVID}/" \
+                     | sed "s/::I18N::/${I18N}/" \
+                     | sed "s/::LCONFPATH::/${LCONFPATH}/" \
+                     | sed "s/::COREPATH::/${COREPATH}/g" >> ${VHOST_FILE}
+
+                    log "\t\tvhost ${WEB_PNAME} created"
+
+                    if ( ! is_user_locked ${USER} ); then
+                        ln -fs ${VHOST_FILE} ${VHOST_LINK}
+                        log "\t\tvhost ${WEB_PNAME} enabled"
+                    fi
+                done;
+            ;;
+            "webdav")
+                    local PNAME=${PNAME}${DOMAIN_SUFFIX}
+                    local PNAME_WEBDAV=${PPATH}${DOMAIN_SUFFIX}
+                    local DOCROOT=/home/webdav/data/${PNAME}/htdocs
+                    if [ ! -d "$DOCROOT" ]; then
+                        mkdir -p $DOCROOT > /dev/null
+                        chown -R webdav:webdav ${DOCROOT%/*} > /dev/null
+                        log "\tpath ${DOCROOT} created"
+                    else
+                        log "\tpath ${DOCROOT} already exists"
+                    fi
+
+                    local ACCESSLOG=$NGINX_LOG_DIR/webdav/${PNAME}_access.log
+                    touch $ACCESSLOG
+                    ln -fs $ACCESSLOG /home/webdav/logs/${PNAME}_access.log
+
+                    local ERRORLOG=$NGINX_LOG_DIR/webdav/${PNAME}_error.log
+                    touch $ERRORLOG
+                    ln -fs $ERRORLOG /home/webdav/logs/${PNAME}_error.log
+
+                    local ACCESSLOG_WEBDAV=$NGINX_LOG_DIR/webdav/${PNAME_WEBDAV}_access.log
+                    touch $ACCESSLOG_WEBDAV
+                    ln -fs $ACCESSLOG_WEBDAV /home/webdav/logs/${PNAME_WEBDAV}_access.log
+
+                    local ERRORLOG_WEBDAV=$NGINX_LOG_DIR/webdav/${PNAME_WEBDAV}_error.log
+                    touch $ERRORLOG_WEBDAV
+                    ln -fs $ERRORLOG_WEBDAV /home/webdav/logs/${PNAME_WEBDAV}_error.log
+
+                    if [ "$P_TPL" == "" ]; then
+                        local TPL="default"
+                    elif [ ! -f "${NGINX_SA}/webdav/${P_TPL}.tpl" ]; then
+                        log "\tWARNING: vhost template ${P_TPL} not found; using default"
+                        local TPL="default"
+                    fi
+
+                    local TPL="${NGINX_SA}/webdav/${TPL}.tpl"
+
+                    if [ ! -f "$TPL" ]; then
+                        log "\tERROR: vhost template '${TPL}' doesn't exists. Skipping project $PNAME"
+                        continue
+                    fi
+
+                    local VHOST_FILE="$NGINX_SA/webdav/${PNAME}.conf"
+                    local VHOST_LINK="$NGINX_SE/webdav/20_${PNAME}.conf"
+                    local DOCROOT=`echo "${DOCROOT}" | sed 's/\//\\\\\//g'`
+                    local ACCESSLOG=`echo "${ACCESSLOG}" | sed 's/\//\\\\\//g'`
+                    local ERRORLOG=`echo "${ERRORLOG}" | sed 's/\//\\\\\//g'`
+                    local ACCESSLOG_WEBDAV=`echo "${ACCESSLOG_WEBDAV}" | sed 's/\//\\\\\//g'`
+                    local ERRORLOG_WEBDAV=`echo "${ERRORLOG_WEBDAV}" | sed 's/\//\\\\\//g'`
+                    cat ${TPL} \
+                     | sed "s/::DOMAINNAME::/${PNAME}/g" \
+                     | sed "s/::DOCROOT::/${DOCROOT}/" \
+                     | sed "s/::ACCESSLOG::/${ACCESSLOG}/" \
+                     | sed "s/::ERRORLOG::/${ERRORLOG}/" \
+                     | sed "s/::DOMAINNAMEWEBDAV::/${PNAME_WEBDAV}/g" \
+                     | sed "s/::ACCESSLOG_WEBDAV::/${ACCESSLOG_WEBDAV}/" \
+                     | sed "s/::ERRORLOG_WEBDAV::/${ERRORLOG_WEBDAV}/" >> ${VHOST_FILE}
+
+                    ln -fs ${VHOST_FILE} ${VHOST_LINK}
+                    log "\tvhosts ${PNAME} & ${PNAME_WEBDAV} created & enabled"
+            ;;
+            *)
+                echo "Skipping $PNAME - unknown type $PTYPE"
+            ;;
+        esac
+    done;
+
+    chmod -R 775 /home/webdav
+#    chown -R www-data:www-data $NGINX_LOG_DIR
+
+    #service nginx reload
+    #service memcached restart
+    /etc/init.d/nginx restart
+    /etc/init.d/memcached restart
+    redis-cli flushall &> /dev/null
+
+    return 0
+}
+
