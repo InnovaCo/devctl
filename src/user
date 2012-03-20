@@ -6,6 +6,16 @@ shift 1
 . /root/ctl/scriptbase
 
 case "${ACTION}" in
+    list)
+        get_users
+        for u in $USERS; do
+            echo -n "$u"
+            if is_user_locked $u; then
+                echo -ne "\t(locked)"
+            fi
+            echo ""
+        done;
+    ;;
     add)
         require_username
         require_email
@@ -33,6 +43,7 @@ case "${ACTION}" in
         echo ${PASS} | sudo -HnSu ${USER} -i git config --global user.email ${MAIL}
 
 #        service ssh restart
+        regen=1
     ;;
     del)
         require_username
@@ -48,9 +59,9 @@ case "${ACTION}" in
         #system
         userdel --remove ${USER}
         groupdel ${USER}
-        rm -rf /home/${USER}
 
 #        service ssh restart
+        regen=1
     ;;
     lock)
         require_username
@@ -64,6 +75,7 @@ case "${ACTION}" in
         echo "usermod -G ${GROUPS} ${USER}"
         unset GROUPS
         service "ssh" restart
+        regen=1
     ;;
     unlock)
         require_username
@@ -75,8 +87,10 @@ case "${ACTION}" in
 
         #samba
         smbpasswd -e ${USER}
+        regen=1
     ;;
     regenerate)
+        regen=1
     ;;
     *)
         echo -ne "Usage:\n\t`basename $0` (add|del|lock|unlock) username [email]\n  or\n\t`basename $0` regenerate\n\n"
@@ -84,6 +98,6 @@ case "${ACTION}" in
     ;;
 esac
 
-regen_projects
+[ "$regen" == "1" ] && regen_projects
 
 exit 0

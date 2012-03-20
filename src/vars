@@ -11,3 +11,7 @@ NGINX_CONF_DIR=/etc/nginx
 NGINX_SA=${NGINX_CONF_DIR}/sites-available
 NGINX_SE=${NGINX_CONF_DIR}/sites-enabled
 NGINX_LOG_DIR=/var/log/nginx
+
+## PHP-FPM ##
+PHPFPM_CONF_DIR=/etc/php5/fpm/pool.d
+PHPFPM_SOCKET_DIR=/var/run/php5-fpm

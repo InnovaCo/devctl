@@ -52,18 +52,30 @@ regen_projects() {
     get_users
 
     log "removing all virtual hosts"
-    rm -f $NGINX_SA/{web,webdav}/*.conf
-    rm -f $NGINX_SE/{web,webdav}/*_*.conf
+    rm -f ${NGINX_SA}/{web,webdav}/*.conf
+    rm -f ${NGINX_SE}/{web,webdav}/*_*.conf
+
+    rm -f ${PHPFPM_CONF_DIR}/*.conf
 
     mkdir -p /home/webdav/{data,logs} > /dev/null
-    mkdir -p $NGINX_LOG_DIR/webdav > /dev/null
+    mkdir -p ${NGINX_LOG_DIR}/webdav > /dev/null
     rm -f /home/webdav/logs/* > /dev/null
 
-    for USER in $USERS; do
+    for USER in ${USERS}; do
+        if ( is_user_locked ${USER} ); then
+            log "\t\tUser ${USER} is locked. Skipping"
+            continue
+        fi
+
         log "preparing directories for user ${USER}"
         if [ ! -d "/home/${USER}/dev" ]; then
             mkdir -p /home/${USER}/dev > /dev/null
             chown -R ${USER}:${USER} /home/${USER}/dev
+        fi
+        if [ ! -d "/home/${USER}/tmp" ]; then
+            mkdir -p /home/${USER}/tmp > /dev/null
+            chown -R ${USER}:${USER} /home/${USER}/tmp
+            chmod 0775 /home/${USER}/tmp
         fi
         if [ ! -d "/home/${USER}/configs-ru" ]; then
             mkdir -p /home/${USER}/configs-ru > /dev/null
@@ -79,7 +91,28 @@ regen_projects() {
         else
             rm -f /home/${USER}/logs/*_{error,access}.log > /dev/null
         fi
-        mkdir -p $NGINX_LOG_DIR/${USER} > /dev/null
+
+        log "preparing nginx & php-fpm pool for user $USER"
+        local NGINX_TPL="$NGINX_SA/web/conf.tpl"
+        local NGINX_CONF="$NGINX_SA/web/${USER}.conf"
+        local PHPFPM_TPL="${PHPFPM_CONF_DIR}/conf.tpl"
+        local PHPFPM_CONF="${PHPFPM_CONF_DIR}/${USER}.conf"
+        local PHPFPM_SOCKET=`echo "${PHPFPM_SOCKET_DIR}/${USER}.socket" | sed 's/\//\\\\\//g'`
+        local PHPFPM_LOG=`echo "/home/${USER}/logs" | sed 's/\//\\\\\//g'`
+        if [ -f "${PHPFPM_TPL}" ] && [ -f "${NGINX_TPL}" ]; then
+            cat ${PHPFPM_TPL} \
+                | sed -e "s/::USER::/${USER}/g" \
+                | sed -e "s/::SOCKET::/${PHPFPM_SOCKET}/g" \
+                | sed -e "s/::LOG_DIR::/${PHPFPM_LOG}/g" > ${PHPFPM_CONF}
+
+            cat ${NGINX_TPL} \
+                | sed -e "s/::USER::/${USER}/g" \
+                | sed -e "s/::SOCKET::/${PHPFPM_SOCKET}/g" > ${NGINX_CONF}
+        else
+            log "\t\tERROR: nginx config template '${NGINX_TPL}' or php-fpm pool template '${PHPFPM_TPL}' doesn't exists. Skipping"
+        fi
+
+
     done;
 
     cat ${PROJECTS_LIST} | cut -d "|" -f 1,2,3,4,5 | while read X; do
@@ -116,6 +149,12 @@ regen_projects() {
             "web")
                 for USER in $USERS; do
                     log "\t@@@ ${USER}"
+
+                    if ( is_user_locked ${USER} ); then
+                        log "\t\tUser ${USER} is locked. Skipping project ${PNAME} for user ${USER}"
+                        continue
+                    fi
+
                     local WEB_PNAME=${USER}.${PNAME}${DOMAIN_SUFFIX}
 
                     local DOCROOT=/home/${USER}/dev/${PPATH}/htdocs
@@ -144,8 +183,8 @@ regen_projects() {
 
                     local TPL="${NGINX_SA}/web/${TPL}.tpl"
 
-                    if [ ! -f "$TPL" ]; then
-                        log "\t\tERROR: vhost template '${TPL}' doesn't exists. Skipping project $PNAME for user $USER"
+                    if [ ! -f "${TPL}" ]; then
+                        log "\t\tERROR: vhost template '${TPL}' doesn't exists. Skipping project ${PNAME} for user ${USER}"
                         continue
                     fi
 
@@ -159,21 +198,20 @@ regen_projects() {
                     local ACCESSLOG=`echo "${ACCESSLOG}" | sed 's/\//\\\\\//g'`
                     local ERRORLOG=`echo "${ERRORLOG}" | sed 's/\//\\\\\//g'`
                     cat ${TPL} \
-                     | sed "s/::DOMAINNAME::/${WEB_PNAME}/g" \
-                     | sed "s/::DOCROOT::/${DOCROOT}/" \
-                     | sed "s/::ACCESSLOG::/${ACCESSLOG}/" \
-                     | sed "s/::ERRORLOG::/${ERRORLOG}/" \
-                     | sed "s/::ENVID::/${ENVID}/" \
-                     | sed "s/::I18N::/${I18N}/" \
-                     | sed "s/::LCONFPATH::/${LCONFPATH}/" \
-                     | sed "s/::COREPATH::/${COREPATH}/g" >> ${VHOST_FILE}
+                     | sed -e "s/::USER::/${USER}/g" \
+                     | sed -e "s/::DOMAINNAME::/${WEB_PNAME}/g" \
+                     | sed -e "s/::DOCROOT::/${DOCROOT}/" \
+                     | sed -e "s/::ACCESSLOG::/${ACCESSLOG}/" \
+                     | sed -e "s/::ERRORLOG::/${ERRORLOG}/" \
+                     | sed -e "s/::ENVID::/${ENVID}/" \
+                     | sed -e "s/::I18N::/${I18N}/" \
+                     | sed -e "s/::LCONFPATH::/${LCONFPATH}/" \
+                     | sed -e "s/::COREPATH::/${COREPATH}/g" >> ${VHOST_FILE}
 
                     log "\t\tvhost ${WEB_PNAME} created"
 
-                    if ( ! is_user_locked ${USER} ); then
-                        ln -fs ${VHOST_FILE} ${VHOST_LINK}
-                        log "\t\tvhost ${WEB_PNAME} enabled"
-                    fi
+                    ln -fs ${VHOST_FILE} ${VHOST_LINK}
+                    log "\t\tvhost ${WEB_PNAME} enabled"
                 done;
             ;;
             "webdav")
@@ -244,13 +282,13 @@ regen_projects() {
     done;
 
     chmod -R 775 /home/webdav
-#    chown -R www-data:www-data $NGINX_LOG_DIR
 
-    #service nginx reload
-    #service memcached restart
+    /etc/init.d/php5-fpm stop
+    /etc/init.d/php5-fpm stop
     /etc/init.d/nginx restart
     /etc/init.d/memcached restart
     redis-cli flushall &> /dev/null
+    /etc/init.d/php5-fpm start
 
     return 0
 }
